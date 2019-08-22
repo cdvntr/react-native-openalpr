@@ -426,6 +426,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         NSError *error = nil;
         AVCaptureDevice *captureDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
         
+        if (captureDevice.isVideoMinFrameDurationSupported)
+            captureDevice.videoMinFrameDuration = CMTimeMake(1, Int32(120));
+        if (captureDevice.isVideoMaxFrameDurationSupported)
+            captureDevice.videoMaxFrameDuration = CMTimeMake(1, Int32(120));
+        
         if (captureDevice == nil) {
             return;
         }
