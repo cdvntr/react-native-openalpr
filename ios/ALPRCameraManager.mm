@@ -427,9 +427,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         AVCaptureDevice *captureDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
         
         if (captureDevice.isVideoMinFrameDurationSupported)
-            captureDevice.videoMinFrameDuration = CMTimeMake(1, Int32(120));
+            captureDevice.videoMinFrameDuration = CMTimeMake(1, 120);
         if (captureDevice.isVideoMaxFrameDurationSupported)
-            captureDevice.videoMaxFrameDuration = CMTimeMake(1, Int32(120));
+            captureDevice.videoMaxFrameDuration = CMTimeMake(1, 120);
         
         if (captureDevice == nil) {
             return;
