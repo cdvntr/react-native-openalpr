@@ -319,6 +319,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         };
         [videoDataOutput setVideoSettings:videoOutputSettings];
         videoDataOutput.alwaysDiscardsLateVideoFrames = YES;
+        if (videoDataOutput.supportsVideoStabilization) {
+            videoDataOutput.preferredVideoStabilizationMode = AVCaptureVideoStabilizationModeAuto;
+        }
         videoDataOutputQueue = dispatch_queue_create("OpenALPR-video-queue", NULL);
         [videoDataOutput setSampleBufferDelegate:self queue:videoDataOutputQueue];
         
