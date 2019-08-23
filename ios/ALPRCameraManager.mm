@@ -38,12 +38,16 @@ void rot90(cv::Mat &matImage, int rotflag) {
 
 #pragma mark Implementation -
 
-@interface ALPRCameraManager () {
+@interface ALPRCameraManager () <AVCapturePhotoCaptureDelegate>  {
     dispatch_queue_t videoDataOutputQueue;
     UIDeviceOrientation deviceOrientation;
 }
 @property (atomic) BOOL isProcessingFrame;
-@property(nonatomic, strong) AVCaptureStillImageOutput *stillImageOutput;
+@property(nonatomic, strong) AVCapturePhotoOutput *avCaptureOutput;
+@property(nonatomic, strong) NSHashTable *takePictureParams;
+@property(nonatomic, strong) NSDictionary *takePictureOptions;
+@property(nonatomic, strong) RCTPromiseResolveBlock takePictureResolve;
+@property(nonatomic, strong) RCTPromiseRejectBlock takePictureReject;
 
 @end
 
@@ -192,20 +196,62 @@ RCT_EXPORT_METHOD(checkVideoAuthorizationStatus:(RCTPromiseResolveBlock)resolve
     }];
 }
 
-RCT_EXPORT_METHOD(takePicture:(RCTPromiseResolveBlock)resolve
+RCT_EXPORT_METHOD(takePicture:(NSDictionary *)options
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject) {
-    AVCaptureConnection *connection = [self.stillImageOutput connectionWithMediaType:AVMediaTypeVideo];
-    [connection setVideoOrientation:self.previewLayer.connection.videoOrientation];
-    [self.stillImageOutput captureStillImageAsynchronouslyFromConnection:connection completionHandler: ^(CMSampleBufferRef imageSampleBuffer, NSError *error) {
-        if (imageSampleBuffer && !error) {
-            NSData *imageData = [AVCaptureStillImageOutput jpegStillImageNSDataRepresentation:imageSampleBuffer];
-            NSString *path = [ALPRCameraManager generatePathInDirectory:[[ALPRCameraManager cacheDirectoryPath] stringByAppendingPathComponent:@"Camera"] withExtension:@".jpg"];
-            NSString *uri = [ALPRCameraManager writeImage:imageData toPath:path];
-            resolve(uri);
-        } else {
-            reject(@"E_IMAGE_CAPTURE_FAILED", @"Image could not be captured", error);
-        }
-    }];
+    self.takePictureOptions = options;
+    self.takePictureResolve = resolve;
+    self.takePictureReject = reject;
+    
+    AVCapturePhotoSettings *settings = [AVCapturePhotoSettings photoSettings];
+    [self.avCaptureOutput capturePhotoWithSettings:settings delegate:self];
+}
+
+- (void)captureOutput:(AVCapturePhotoOutput *)output didFinishProcessingPhoto:(AVCapturePhoto *)photo error:(nullable NSError *)error
+{
+    if (!error) {
+        NSData *imageData = [photo fileDataRepresentation];
+        NSData* compressedImage = [ALPRCameraManager imageWithImage:imageData options:self.takePictureOptions];
+        NSString *path = [ALPRCameraManager generatePathInDirectory:[[ALPRCameraManager cacheDirectoryPath] stringByAppendingPathComponent:@"Camera"] withExtension:@".jpg"];
+        NSString *uri = [ALPRCameraManager writeImage:compressedImage toPath:path];
+        self.takePictureResolve(uri);
+    } else {
+        self.takePictureReject(@"E_IMAGE_CAPTURE_FAILED", @"Image could not be captured", error);
+    }
+}
+
++ (NSData *)imageWithImage:(NSData *)imageData options:(NSDictionary *)options {
+    UIImage *image = [UIImage imageWithData:imageData];
+    
+    // Calculate the image size.
+    int width = image.size.width, height = image.size.height;
+    float quality, scale;
+    
+    if([options valueForKey:@"width"] != nil) {
+        width = [options[@"width"] intValue];
+    }
+    if([options valueForKey:@"height"] != nil) {
+        height = [options[@"height"] intValue];
+    }
+    
+    float widthScale = image.size.width / width;
+    float heightScale = image.size.height / height;
+    
+    if(widthScale > heightScale) {
+        scale = heightScale;
+    } else {
+        scale = widthScale;
+    }
+    
+    if([options valueForKey:@"quality"] != nil) {
+        quality = [options[@"quality"] floatValue];
+    } else {
+        quality = 1.0; // Default quality
+    }
+    
+    UIImage *destImage = [UIImage imageWithCGImage:[image CGImage] scale:scale orientation:UIImageOrientationUp];
+    NSData *destData = UIImageJPEGRepresentation(destImage, quality);
+    return destData;
 }
 
 + (NSString *)generatePathInDirectory:(NSString *)directory withExtension:(NSString *)extension
@@ -319,9 +365,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         };
         [videoDataOutput setVideoSettings:videoOutputSettings];
         videoDataOutput.alwaysDiscardsLateVideoFrames = YES;
-        if (videoDataOutput.supportsVideoStabilization) {
-            videoDataOutput.preferredVideoStabilizationMode = AVCaptureVideoStabilizationModeAuto;
+        
+        AVCaptureConnection *videoConnection = [self.avCaptureOutput connectionWithMediaType:AVMediaTypeVideo];
+        
+        
+        if (videoConnection.supportsVideoStabilization) {
+            videoConnection.preferredVideoStabilizationMode = AVCaptureVideoStabilizationModeAuto;
         }
+
         videoDataOutputQueue = dispatch_queue_create("OpenALPR-video-queue", NULL);
         [videoDataOutput setSampleBufferDelegate:self queue:videoDataOutputQueue];
         
@@ -330,14 +381,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [self.session addOutput:videoDataOutput];
         }
         
-        AVCaptureStillImageOutput *stillImageOutput = [[AVCaptureStillImageOutput alloc] init];
-        if ([self.session canAddOutput:stillImageOutput]) {
-            stillImageOutput.outputSettings = @{AVVideoCodecKey : AVVideoCodecJPEG};
-            [self.session addOutput:stillImageOutput];
-            [stillImageOutput setHighResolutionStillImageOutputEnabled:YES];
-            self.stillImageOutput = stillImageOutput;
+        self.avCaptureOutput = [[AVCapturePhotoOutput alloc] init];
+        if([self.session canAddOutput:self.avCaptureOutput]) {
+            [self.session addOutput:self.avCaptureOutput];
         }
-
+        
         __weak ALPRCameraManager *weakSelf = self;
         [self setRuntimeErrorHandlingObserver:[NSNotificationCenter.defaultCenter addObserverForName:AVCaptureSessionRuntimeErrorNotification object:self.session queue:nil usingBlock:^(NSNotification *note) {
             ALPRCameraManager *strongSelf = weakSelf;
@@ -399,24 +447,27 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     self.camera = nil;
     return;
 #endif
-    dispatch_async(self.sessionQueue, ^{
-        self.camera = nil;
-        [self.previewLayer removeFromSuperlayer];
-        [self.session commitConfiguration];
-        [self.session stopRunning];
-        for(AVCaptureInput *input in self.session.inputs) {
-            [self.session removeInput:input];
-        }
+    // Make sure that we are on the main thread when we are 
+    // ending the session, otherwise we may get an exception:
+    // Fatal Exception: NSGenericException
+    // *** Collection <CALayerArray: 0x282781230> was mutated while being enumerated.
+    // -[ALPRCamera removeFromSuperview]
+    self.camera = nil;
+    [self.previewLayer removeFromSuperlayer];
+    [self.session commitConfiguration];
+    [self.session stopRunning];
+    for(AVCaptureInput *input in self.session.inputs) {
+        [self.session removeInput:input];
+    }
         
-        for(AVCaptureOutput *output in self.session.outputs) {
-            [self.session removeOutput:output];
-        }
+    for(AVCaptureOutput *output in self.session.outputs) {
+        [self.session removeOutput:output];
+    }
         
-        [[NSNotificationCenter defaultCenter] removeObserver:self];
-        if ([[UIDevice currentDevice] isGeneratingDeviceOrientationNotifications]) {
-            [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
-        }
-    });
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    if ([[UIDevice currentDevice] isGeneratingDeviceOrientationNotifications]) {
+        [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
+    }
 }
 
 - (void)initializeCaptureSessionInput:(NSString *)type {
@@ -424,16 +475,38 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         [self.session beginConfiguration];
         
         NSError *error = nil;
+        CMTime minFrameDuration = CMTimeMake(1, 60);
+        CMTime maxFrameDuration = CMTimeMake(1, 240);
         AVCaptureDevice *captureDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
-        
-        if (captureDevice.isVideoMinFrameDurationSupported)
-            captureDevice.videoMinFrameDuration = CMTimeMake(1, 120);
-        if (captureDevice.isVideoMaxFrameDurationSupported)
-            captureDevice.videoMaxFrameDuration = CMTimeMake(1, 120);
         
         if (captureDevice == nil) {
             return;
         }
+        
+        if ([captureDevice respondsToSelector:@selector(isLowLightBoostSupported)]) {
+            if ([captureDevice lockForConfiguration:nil]) {
+                if (captureDevice.isLowLightBoostSupported) {
+                    captureDevice.automaticallyEnablesLowLightBoostWhenAvailable = YES;
+                }
+                [captureDevice unlockForConfiguration];
+            }
+        }
+        
+        NSArray *supportedFrameRateRanges = [captureDevice.activeFormat videoSupportedFrameRateRanges];
+        BOOL frameRateSupported = NO;
+        for (AVFrameRateRange *range in supportedFrameRateRanges) {
+            if (CMTIME_COMPARE_INLINE(minFrameDuration, >=, range.minFrameDuration) &&
+                CMTIME_COMPARE_INLINE(maxFrameDuration, <=, range.maxFrameDuration)) {
+                frameRateSupported = YES;
+            }
+        }
+        
+        if (frameRateSupported && [captureDevice lockForConfiguration:&error]) {
+            [captureDevice setActiveVideoMaxFrameDuration:maxFrameDuration];
+            [captureDevice setActiveVideoMinFrameDuration:minFrameDuration];
+            [captureDevice unlockForConfiguration];
+        }
+
         
         AVCaptureDeviceInput *captureDeviceInput = [AVCaptureDeviceInput deviceInputWithDevice:captureDevice error:&error];
         
