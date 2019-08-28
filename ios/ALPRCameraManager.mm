@@ -88,9 +88,9 @@ RCT_EXPORT_MODULE(ALPRCameraManager);
                      @"AVCaptureSessionPresetPhoto": @(ALPRCameraCaptureSessionPresetPhoto),
                      @"480p": @(ALPRCameraCaptureSessionPreset480p),
                      @"AVCaptureSessionPreset640x480": @(ALPRCameraCaptureSessionPreset480p),
-                     @"720p": @(ALPRCameraCaptureSessionPreset720p),
+                     @"hd": @(ALPRCameraCaptureSessionPreset720p),
                      @"AVCaptureSessionPreset1280x720": @(ALPRCameraCaptureSessionPreset720p),
-                     @"1080p": @(ALPRCameraCaptureSessionPreset1080p),
+                     @"fullHd": @(ALPRCameraCaptureSessionPreset1080p),
                      @"AVCaptureSessionPreset1920x1080": @(ALPRCameraCaptureSessionPreset1080p)
                      },
              @"TorchMode": @{
@@ -207,13 +207,36 @@ RCT_EXPORT_METHOD(takePicture:(NSDictionary *)options
     [self.avCaptureOutput capturePhotoWithSettings:settings delegate:self];
 }
 
++ (UIImage *)forceUpOrientation:(UIImage *)image
+{
+    if (image.imageOrientation != UIImageOrientationUp) {
+        UIGraphicsBeginImageContextWithOptions(image.size, NO, image.scale);
+        [image drawInRect:CGRectMake(0, 0, image.size.width, image.size.height)];
+        image = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+    }
+    return image;
+}
+
 - (void)captureOutput:(AVCapturePhotoOutput *)output didFinishProcessingPhoto:(AVCapturePhoto *)photo error:(nullable NSError *)error
 {
     if (!error) {
         NSData *imageData = [photo fileDataRepresentation];
-        NSData* compressedImage = [ALPRCameraManager imageWithImage:imageData options:self.takePictureOptions];
+        
+        UIImage *uiImage = [UIImage imageWithData:imageData];
+        UIImage *upImage = [ALPRCameraManager forceUpOrientation:uiImage];
+        NSData *presentImage = UIImagePNGRepresentation(upImage);
+        
+        NSData* compressedImage = [ALPRCameraManager imageWithImage:presentImage options:self.takePictureOptions];
+    
+        
         NSString *path = [ALPRCameraManager generatePathInDirectory:[[ALPRCameraManager cacheDirectoryPath] stringByAppendingPathComponent:@"Camera"] withExtension:@".jpg"];
+        
         NSString *uri = [ALPRCameraManager writeImage:compressedImage toPath:path];
+        UIImage *image = [[UIImage alloc] initWithContentsOfFile:path];
+        
+        
+
         self.takePictureResolve(uri);
     } else {
         self.takePictureReject(@"E_IMAGE_CAPTURE_FAILED", @"Image could not be captured", error);
@@ -372,7 +395,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         if (videoConnection.supportsVideoStabilization) {
             videoConnection.preferredVideoStabilizationMode = AVCaptureVideoStabilizationModeAuto;
         }
-
+        
         videoDataOutputQueue = dispatch_queue_create("OpenALPR-video-queue", NULL);
         [videoDataOutput setSampleBufferDelegate:self queue:videoDataOutputQueue];
         
@@ -476,20 +499,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         
         NSError *error = nil;
         CMTime minFrameDuration = CMTimeMake(1, 60);
-        CMTime maxFrameDuration = CMTimeMake(1, 240);
+        CMTime maxFrameDuration = CMTimeMake(1, 60);
         AVCaptureDevice *captureDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
         
         if (captureDevice == nil) {
             return;
-        }
-        
-        if ([captureDevice respondsToSelector:@selector(isLowLightBoostSupported)]) {
-            if ([captureDevice lockForConfiguration:nil]) {
-                if (captureDevice.isLowLightBoostSupported) {
-                    captureDevice.automaticallyEnablesLowLightBoostWhenAvailable = YES;
-                }
-                [captureDevice unlockForConfiguration];
-            }
         }
         
         NSArray *supportedFrameRateRanges = [captureDevice.activeFormat videoSupportedFrameRateRanges];
@@ -506,7 +520,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [captureDevice setActiveVideoMinFrameDuration:minFrameDuration];
             [captureDevice unlockForConfiguration];
         }
-
         
         AVCaptureDeviceInput *captureDeviceInput = [AVCaptureDeviceInput deviceInputWithDevice:captureDevice error:&error];
         
